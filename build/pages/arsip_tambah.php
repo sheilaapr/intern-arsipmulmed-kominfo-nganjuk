@@ -1,0 +1,92 @@
+<?php
+require_once __DIR__.'/auth.php';
+require_once __DIR__.'/partials/layout.php';
+require_login();
+
+$idKategori=(int)($_GET['id_kategori']??$_POST['id_kategori']??0);
+if($idKategori<=0){set_flash('warning','Kategori arsip tidak ditemukan.');redirect('arsip.php');}
+$q=$koneksi->prepare('SELECT id_kategori,nama_kategori,deskripsi FROM kategori WHERE id_kategori=? LIMIT 1');$q->bind_param('i',$idKategori);$q->execute();$kategori=$q->get_result()->fetch_assoc();
+if(!$kategori){set_flash('warning','Kategori arsip tidak ditemukan.');redirect('arsip.php');}
+
+if($_SERVER['REQUEST_METHOD']==='POST'){
+ verify_csrf(); $action=(string)($_POST['action']??'');
+ if($action==='create_archive'||$action==='update_archive'){
+   $idArsip=(int)($_POST['id_arsip']??0);$judul=trim((string)($_POST['judul']??''));$deskripsi=trim((string)($_POST['deskripsi']??''));$tanggal=(string)($_POST['tanggal_acara']??'');
+   if($judul===''||text_length($judul)>150||$deskripsi===''||$tanggal===''||strtotime($tanggal)===false){set_flash('danger','Judul, deskripsi, dan tanggal kegiatan wajib diisi dengan benar.');redirect('arsip_tambah.php?id_kategori='.$idKategori);}
+   $incoming=normalize_uploads($_FILES['files']??[]);
+   if($action==='create_archive'&&!$incoming){set_flash('danger','Pilih minimal satu file untuk arsip baru.');redirect('arsip_tambah.php?id_kategori='.$idKategori);}
+   $existing=0;
+   if($action==='update_archive'){$c=$koneksi->prepare('SELECT COUNT(*) total FROM arsip_file WHERE id_arsip=?');$c->bind_param('i',$idArsip);$c->execute();$existing=(int)$c->get_result()->fetch_assoc()['total'];}
+   if($existing+count($incoming)>25){set_flash('warning','Maksimal 25 file untuk setiap arsip.');redirect('arsip_tambah.php?id_kategori='.$idKategori);}
+   $folder=safe_folder($judul);$saved=[];
+   try{
+     if($incoming)$saved=store_archive_uploads($_FILES['files'],$folder,25-$existing);
+     mysqli_begin_transaction($koneksi);
+     if($action==='create_archive'){
+       $first=$saved[0]['filename'];$type=$saved[0]['tipe_file'];$uid=(int)$_SESSION['id'];
+       $s=$koneksi->prepare('INSERT INTO arsip(judul,deskripsi,filename,tipe_file,id_kategori,tanggal_acara,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,NOW())');
+       $s->bind_param('ssssisi',$judul,$deskripsi,$first,$type,$idKategori,$tanggal,$uid);
+     }else{
+       $s=$koneksi->prepare('UPDATE arsip SET judul=?,deskripsi=?,tanggal_acara=? WHERE id_arsip=? AND id_kategori=?');$s->bind_param('sssii',$judul,$deskripsi,$tanggal,$idArsip,$idKategori);
+     }
+     if(!$s->execute())throw new RuntimeException('Data arsip gagal disimpan.');
+     if($action==='create_archive')$idArsip=(int)$koneksi->insert_id;
+     if($saved){$sf=$koneksi->prepare('INSERT INTO arsip_file(id_arsip,filename,tipe_file) VALUES(?,?,?)');foreach($saved as $file){$sf->bind_param('iss',$idArsip,$file['filename'],$file['tipe_file']);if(!$sf->execute())throw new RuntimeException('Daftar file gagal disimpan.');}}
+     if($action==='update_archive'&&$saved&&$existing===0){$first=$saved[0]['filename'];$type=$saved[0]['tipe_file'];$u=$koneksi->prepare('UPDATE arsip SET filename=?,tipe_file=? WHERE id_arsip=?');$u->bind_param('ssi',$first,$type,$idArsip);$u->execute();}
+     mysqli_commit($koneksi);set_flash('success',$action==='create_archive'?'Arsip berhasil ditambahkan.':'Arsip berhasil diperbarui.');
+   }catch(Throwable $err){mysqli_rollback($koneksi);foreach($saved as $file)delete_uploaded_file($file['filename']);set_flash('danger',$err->getMessage());}
+   redirect('arsip_tambah.php?id_kategori='.$idKategori);
+ }
+ if($action==='delete_file'){
+   $idFile=(int)($_POST['id_file']??0);$q=$koneksi->prepare('SELECT af.filename,af.id_arsip FROM arsip_file af JOIN arsip a ON a.id_arsip=af.id_arsip WHERE af.id_file=? AND a.id_kategori=?');$q->bind_param('ii',$idFile,$idKategori);$q->execute();$file=$q->get_result()->fetch_assoc();
+   if($file){mysqli_begin_transaction($koneksi);$d=$koneksi->prepare('DELETE FROM arsip_file WHERE id_file=?');$d->bind_param('i',$idFile);$d->execute();$idArsip=(int)$file['id_arsip'];
+     $n=$koneksi->prepare('SELECT filename,tipe_file FROM arsip_file WHERE id_arsip=? ORDER BY id_file LIMIT 1');$n->bind_param('i',$idArsip);$n->execute();$next=$n->get_result()->fetch_assoc();
+     $filename=$next['filename']??null;$type=$next['tipe_file']??null;$u=$koneksi->prepare('UPDATE arsip SET filename=?,tipe_file=? WHERE id_arsip=?');$u->bind_param('ssi',$filename,$type,$idArsip);$u->execute();mysqli_commit($koneksi);delete_uploaded_file($file['filename']);set_flash('success','File berhasil dihapus.');}
+   redirect('arsip_tambah.php?id_kategori='.$idKategori);
+ }
+ if($action==='delete_archive'){
+   $idArsip=(int)($_POST['id_arsip']??0);$files=[];$q=$koneksi->prepare('SELECT af.filename FROM arsip_file af JOIN arsip a ON a.id_arsip=af.id_arsip WHERE af.id_arsip=? AND a.id_kategori=?');$q->bind_param('ii',$idArsip,$idKategori);$q->execute();$r=$q->get_result();while($x=$r->fetch_assoc())$files[]=$x['filename'];
+   mysqli_begin_transaction($koneksi);$d=$koneksi->prepare('DELETE FROM arsip_file WHERE id_arsip=?');$d->bind_param('i',$idArsip);$d->execute();$d=$koneksi->prepare('DELETE FROM arsip WHERE id_arsip=? AND id_kategori=?');$d->bind_param('ii',$idArsip,$idKategori);$ok=$d->execute();mysqli_commit($koneksi);
+   if($ok){foreach($files as $file)delete_uploaded_file($file);set_flash('success','Arsip berhasil dihapus.');}else set_flash('danger','Arsip gagal dihapus.');
+   redirect('arsip_tambah.php?id_kategori='.$idKategori);
+ }
+}
+
+$archives=[];$q=$koneksi->prepare("SELECT a.*,u.nama uploader FROM arsip a LEFT JOIN users u ON u.id=a.uploaded_by WHERE a.id_kategori=? ORDER BY a.tanggal_acara DESC,a.id_arsip DESC");$q->bind_param('i',$idKategori);$q->execute();$r=$q->get_result();while($x=$r->fetch_assoc())$archives[]=$x;
+$files=[];$q=$koneksi->prepare('SELECT af.* FROM arsip_file af JOIN arsip a ON a.id_arsip=af.id_arsip WHERE a.id_kategori=? ORDER BY af.id_file');$q->bind_param('i',$idKategori);$q->execute();$r=$q->get_result();while($x=$r->fetch_assoc())$files[(int)$x['id_arsip']][]=$x;
+$totalFiles=0;foreach($files as $list)$totalFiles+=count($list);
+$gallery=[];foreach($files as $aid=>$list){foreach($list as $f)if(is_image_extension($f['tipe_file']))$gallery[$aid][]=['src'=>'uploads/'.$f['filename'],'name'=>basename($f['filename'])];}
+render_app_start('Galeri '.$kategori['nama_kategori'],$kategori['deskripsi']?:'Kelola foto dan dokumen dalam kategori ini.','arsip_tambah.php'); ?>
+<section class="hero"><div class="hero-copy"><span class="hero-kicker">Kategori Arsip</span><h2><?=e($kategori['nama_kategori'])?></h2><p><?=e($kategori['deskripsi']?:'Galeri foto dan dokumen kegiatan yang tersimpan dalam kategori ini.')?></p></div><div class="hero-actions"><a class="btn btn-light" href="arsip.php"><i class="fa-solid fa-arrow-left"></i> Semua Kategori</a><button class="btn btn-secondary" data-modal-open="createArchive"><i class="fa-solid fa-cloud-arrow-up"></i> Tambah Arsip</button></div></section>
+<section class="stats-grid"><article class="stat-card"><span class="stat-icon blue"><i class="fa-solid fa-box-archive"></i></span><div class="stat-copy"><strong><?=count($archives)?></strong><span>Arsip kegiatan</span></div></article><article class="stat-card"><span class="stat-icon purple"><i class="fa-solid fa-paperclip"></i></span><div class="stat-copy"><strong><?=$totalFiles?></strong><span>Total file</span></div></article><article class="stat-card"><span class="stat-icon green"><i class="fa-regular fa-images"></i></span><div class="stat-copy"><strong><?=array_sum(array_map('count',$gallery))?></strong><span>Foto galeri</span></div></article><article class="stat-card"><span class="stat-icon orange"><i class="fa-regular fa-calendar"></i></span><div class="stat-copy"><strong><?=date('Y')?></strong><span>Periode aktif</span></div></article></section>
+<section class="panel section-gap"><header class="panel-header"><div class="panel-title"><h2>Koleksi dokumentasi</h2><p>Foto dapat dibuka dalam tampilan layar penuh.</p></div><div class="toolbar"><label class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input class="input" type="search" placeholder="Cari judul atau deskripsi..." data-live-search=".archive-card" data-empty-target="#archiveEmptySearch"></label><button class="btn btn-primary" data-modal-open="createArchive"><i class="fa-solid fa-plus"></i> Tambah</button></div></header><div class="panel-body">
+<?php if($archives):?><div class="archive-grid"><?php foreach($archives as $archive):$aid=(int)$archive['id_arsip'];$all=$files[$aid]??[];$images=array_values(array_filter($all,fn($f)=>is_image_extension($f['tipe_file'])));$docs=array_values(array_filter($all,fn($f)=>!is_image_extension($f['tipe_file'])));?>
+<article class="archive-card" data-search="<?=e($archive['judul'].' '.$archive['deskripsi'].' '.$archive['uploader'])?>">
+<div class="archive-cover"><?php if($images):?><img src="uploads/<?=e($images[0]['filename'])?>" alt="<?=e($archive['judul'])?>" onclick="openGallery(<?=$aid?>,0)" style="cursor:pointer"><?php else:?><div class="file-placeholder"><span><i class="fa-regular fa-file-lines"></i><br>Dokumen arsip</span></div><?php endif;?><span class="archive-count"><?=count($all)?> file</span></div>
+<?php if(count($images)>1):?><div class="thumb-strip"><?php foreach(array_slice($images,0,4) as $ix=>$img):?><button onclick="openGallery(<?=$aid?>,<?=$ix?>)"><img src="uploads/<?=e($img['filename'])?>" alt=""></button><?php endforeach;?></div><?php endif;?>
+<div class="archive-body"><h3><?=e($archive['judul'])?></h3><div class="archive-description"><?=e($archive['deskripsi'])?></div><div class="archive-meta"><span><i class="fa-regular fa-calendar"></i><?=e(format_date_id($archive['tanggal_acara']))?></span><span><i class="fa-regular fa-user"></i><?=e($archive['uploader']?:'-')?></span></div>
+<?php if($docs):?><div class="document-list"><?php foreach(array_slice($docs,0,3) as $doc):?><a class="document-link" target="_blank" href="uploads/<?=e($doc['filename'])?>"><i class="fa-regular fa-file-lines"></i><span><?=e(basename($doc['filename']))?></span></a><?php endforeach;?></div><?php endif;?>
+<div class="card-actions"><button class="btn btn-outline btn-sm" onclick='editArchive(<?=json_encode(["id"=>$aid,"judul"=>$archive["judul"],"deskripsi"=>$archive["deskripsi"],"tanggal"=>$archive["tanggal_acara"]],JSON_HEX_APOS|JSON_HEX_QUOT)?>)'><i class="fa-solid fa-pen"></i> Edit</button><button class="btn btn-secondary btn-sm" onclick="manageFiles(<?=$aid?>)"><i class="fa-solid fa-paperclip"></i> File</button><form method="post" style="margin-left:auto"><?=csrf_field()?><input type="hidden" name="action" value="delete_archive"><input type="hidden" name="id_kategori" value="<?=$idKategori?>"><input type="hidden" name="id_arsip" value="<?=$aid?>"><button class="btn btn-danger btn-sm" type="submit" data-confirm="Hapus arsip beserta seluruh file di dalamnya?"><i class="fa-solid fa-trash"></i></button></form></div></div></article>
+<?php endforeach;?></div><div id="archiveEmptySearch" class="empty-state" hidden><i class="fa-solid fa-magnifying-glass"></i><h3>Arsip tidak ditemukan</h3><p>Coba kata pencarian lain.</p></div>
+<?php else:?><div class="empty-state"><i class="fa-regular fa-images"></i><h3>Belum ada dokumentasi</h3><p>Tambahkan arsip pertama ke kategori ini.</p><button class="btn btn-primary" data-modal-open="createArchive">Tambah arsip</button></div><?php endif;?></div></section>
+
+<div class="modal" id="createArchive"><div class="modal-panel modal-lg"><header class="modal-header"><div class="modal-header-copy"><h2>Tambah arsip baru</h2><p>Unggah maksimal 25 file, masing-masing maksimal 10 MB.</p></div><button class="icon-btn" data-modal-close><i class="fa-solid fa-xmark"></i></button></header><form method="post" enctype="multipart/form-data" data-submit-lock><?=csrf_field()?><input type="hidden" name="action" value="create_archive"><input type="hidden" name="id_kategori" value="<?=$idKategori?>"><div class="modal-body"><div class="form-grid"><div class="field"><label>Judul arsip</label><input name="judul" maxlength="150" required></div><div class="field"><label>Tanggal kegiatan</label><input type="date" name="tanggal_acara" max="<?=date('Y-m-d')?>" required></div><div class="field field-full"><label>Deskripsi</label><textarea name="deskripsi" maxlength="2000" required></textarea></div><div class="field field-full"><label>Foto atau dokumen</label><div class="upload-zone"><input type="file" name="files[]" multiple required accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx" data-file-input="createPreview"><i class="fa-solid fa-cloud-arrow-up"></i><strong>Klik atau seret file ke sini</strong><span>JPG, PNG, GIF, WEBP, PDF, DOC, DOCX</span></div><div class="upload-preview" id="createPreview"></div></div></div></div><footer class="modal-footer"><button class="btn btn-outline" type="button" data-modal-close>Batal</button><button class="btn btn-primary" type="submit"><i class="fa-solid fa-floppy-disk"></i> Simpan</button></footer></form></div></div>
+<div class="modal" id="editArchive"><div class="modal-panel modal-lg"><header class="modal-header"><div class="modal-header-copy"><h2>Edit arsip</h2><p>Perbarui informasi atau tambahkan file baru.</p></div><button class="icon-btn" data-modal-close><i class="fa-solid fa-xmark"></i></button></header><form method="post" enctype="multipart/form-data" data-submit-lock><?=csrf_field()?><input type="hidden" name="action" value="update_archive"><input type="hidden" name="id_kategori" value="<?=$idKategori?>"><input type="hidden" name="id_arsip" id="editArchiveId"><div class="modal-body"><div class="form-grid"><div class="field"><label>Judul</label><input name="judul" id="editArchiveTitle" maxlength="150" required></div><div class="field"><label>Tanggal</label><input type="date" name="tanggal_acara" id="editArchiveDate" required></div><div class="field field-full"><label>Deskripsi</label><textarea name="deskripsi" id="editArchiveDescription" maxlength="2000" required></textarea></div><div class="field field-full"><label>Tambah file (opsional)</label><div class="upload-zone"><input type="file" name="files[]" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx" data-file-input="editPreview"><i class="fa-solid fa-paperclip"></i><strong>Pilih file tambahan</strong><span>Total maksimal 25 file per arsip</span></div><div class="upload-preview" id="editPreview"></div></div></div></div><footer class="modal-footer"><button class="btn btn-outline" type="button" data-modal-close>Batal</button><button class="btn btn-primary" type="submit">Perbarui</button></footer></form></div></div>
+<div class="modal" id="manageFiles"><div class="modal-panel"><header class="modal-header"><div class="modal-header-copy"><h2>Kelola file</h2><p>Hapus file yang tidak diperlukan.</p></div><button class="icon-btn" data-modal-close><i class="fa-solid fa-xmark"></i></button></header><div class="modal-body" id="manageFilesBody"></div></div></div>
+<div class="lightbox" id="lightbox"><button class="lightbox-close" onclick="closeGallery()"><i class="fa-solid fa-xmark"></i></button><button class="lightbox-prev" onclick="changeGallery(-1)"><i class="fa-solid fa-chevron-left"></i></button><img id="lightboxImage" alt=""><button class="lightbox-next" onclick="changeGallery(1)"><i class="fa-solid fa-chevron-right"></i></button><span class="lightbox-caption" id="lightboxCaption"></span></div>
+<?php
+$filesJs=[];foreach($files as $aid=>$list){$filesJs[$aid]=array_map(fn($f)=>['id'=>(int)$f['id_file'],'name'=>basename($f['filename']),'type'=>$f['tipe_file'],'url'=>'uploads/'.$f['filename']],$list);}
+$dataGallery=json_encode($gallery,JSON_UNESCAPED_SLASHES|JSON_HEX_TAG);$dataFiles=json_encode($filesJs,JSON_UNESCAPED_SLASHES|JSON_HEX_TAG);$token=json_encode(csrf_token());
+$script=<<<JS
+<script>
+const galleryData=$dataGallery, archiveFiles=$dataFiles, csrf=$token;let current=[],index=0;
+function editArchive(d){document.getElementById('editArchiveId').value=d.id;document.getElementById('editArchiveTitle').value=d.judul||'';document.getElementById('editArchiveDescription').value=d.deskripsi||'';document.getElementById('editArchiveDate').value=d.tanggal||'';openModal('editArchive')}
+function openGallery(id,i){current=galleryData[id]||[];if(!current.length)return;index=i||0;showGallery();document.getElementById('lightbox').classList.add('is-open');document.body.classList.add('modal-open')}
+function showGallery(){const x=current[index];document.getElementById('lightboxImage').src=x.src;document.getElementById('lightboxCaption').textContent=(index+1)+' / '+current.length+' · '+x.name}
+function changeGallery(step){if(!current.length)return;index=(index+step+current.length)%current.length;showGallery()}
+function closeGallery(){document.getElementById('lightbox').classList.remove('is-open');document.body.classList.remove('modal-open')}
+function manageFiles(id){const list=archiveFiles[id]||[],body=document.getElementById('manageFilesBody');body.innerHTML=list.length?'':'<div class="empty-state"><p>Tidak ada file.</p></div>';list.forEach(f=>{const row=document.createElement('div');row.className='list-row';row.innerHTML='<span class="list-icon"><i class="fa-regular fa-file-lines"></i></span><span class="list-copy"><strong></strong><span></span></span><a class="btn btn-outline btn-sm" target="_blank"><i class="fa-solid fa-eye"></i></a><form method="post" style="margin:0"><input type="hidden" name="csrf_token"><input type="hidden" name="action" value="delete_file"><input type="hidden" name="id_kategori" value="$idKategori"><input type="hidden" name="id_file"><button class="btn btn-danger btn-sm" data-confirm="Hapus file ini?"><i class="fa-solid fa-trash"></i></button></form>';row.querySelector('strong').textContent=f.name;row.querySelector('.list-copy span').textContent=f.type;row.querySelector('a').href=f.url;row.querySelector('[name=csrf_token]').value=csrf;row.querySelector('[name=id_file]').value=f.id;row.querySelector('button').onclick=e=>{if(!confirm('Hapus file ini?'))e.preventDefault()};body.appendChild(row)});openModal('manageFiles')}
+document.addEventListener('keydown',e=>{if(document.getElementById('lightbox').classList.contains('is-open')){if(e.key==='Escape')closeGallery();if(e.key==='ArrowLeft')changeGallery(-1);if(e.key==='ArrowRight')changeGallery(1)}})
+</script>
+JS;
+render_app_end($script); ?>

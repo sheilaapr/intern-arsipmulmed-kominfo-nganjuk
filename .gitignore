@@ -1,0 +1,24 @@
+# File konfigurasi pribadi
+.env
+.env.*
+
+# File log
+*.log
+
+# File sistem
+.DS_Store
+Thumbs.db
+
+# Pengaturan editor
+.vscode/
+.idea/
+
+# File upload pengguna
+build/pages/uploads/*
+!build/pages/uploads/.htaccess
+!build/pages/uploads/index.html
+
+# File sementara
+tmp/
+temp/
+cache/
