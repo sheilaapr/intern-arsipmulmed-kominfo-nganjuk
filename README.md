@@ -36,4 +36,3 @@ Aplikasi PHP dan MySQL untuk mengelola kategori, foto kegiatan, dokumen, anggota
 - `build/assets/css/app.css` — desain aplikasi
 - `build/assets/js/app.js` — interaksi umum
 - `build/pages/uploads/` — file arsip dan foto profil
-- `CATATAN_UPDATE.md` — daftar perubahan versi 2.0
